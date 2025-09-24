@@ -6,94 +6,145 @@ import warnings
 # Suppress the UserWarning from scikit-learn
 warnings.filterwarnings("ignore", category=UserWarning)
 
-def run_simulation(num_weeks_to_simulate=10, num_top_products=5, epsilon=0.2):
+
+def get_true_market_demand(prescribed_price, base_price, base_demand, market_conditions, shock_multiplier=1.0):
     """
-    Final version: Simulates the closed-loop process for multiple products,
-    incorporating an epsilon-greedy strategy for exploration.
+    This is our "hidden" ground truth model. The ML model does not know the rules here.
+    It simulates the real market's response to our pricing and market conditions.
     """
-    print("--- STARTING FINAL SIMULATION WITH EXPLORATION ---")
-    print(f"Exploration Rate (Epsilon): {epsilon*100}%")
+    # Effect of price deviation from base price (price elasticity)
+    price_effect = (base_price - prescribed_price) * 2.5  # For every $1 cheaper, sell 2.5 more units
+
+    # Effect of competitor price (cross-elasticity)
+    competitor_effect = (market_conditions['competitor_price'] - prescribed_price) * 0.5
+
+    # Effect of CPI (higher CPI means less spending money, so lower demand)
+    cpi_effect = (102 - market_conditions['cpi']) * 1.0 # Baseline CPI is 102
+
+    # Effect of a promotion/holiday event
+    promotion_effect = 20 if market_conditions['is_promotion'] else 0
+
+    # General market randomness/noise
+    noise = np.random.normal(0, base_demand * 0.1) # Noise is 10% of base demand
+
+    true_sales = base_demand + price_effect + competitor_effect + cpi_effect + promotion_effect + noise
+    
+    # Apply the shock and ensure sales are not negative
+    return max(0, int(true_sales * shock_multiplier))
+
+
+def update_market_conditions(market_state):
+    """Simulates the market changing from week to week."""
+    # CPI has a slight random drift
+    market_state['cpi'] += np.random.uniform(-0.1, 0.1)
+    
+    # Competitor adjusts their price slightly
+    market_state['competitor_price'] *= np.random.uniform(0.98, 1.02)
+    
+    # 15% chance of a promotion event next week
+    market_state['is_promotion'] = np.random.rand() < 0.15
+    
+    return market_state
+
+
+def run_simulation(num_weeks_to_simulate=10, num_top_products=5, epsilon=0.2, shock_chance=0.1):
+    print("--- STARTING ADVANCED DIGITAL TWIN SIMULATION ---")
 
     # 1. Load initial data and model
     df = pd.read_csv('augmented_processed_data.csv')
     historical_model = joblib.load('historical_model.pkl')
     
-    # Identify top products
     top_products = df['item_description'].value_counts().nlargest(num_top_products).index.tolist()
     print(f"Simulating for top products: {top_products}")
+
+    # Initialize the market state
+    market_state = {
+        'cpi': 102.0,
+        'competitor_price': df['competitor_price'].mean(),
+        'is_promotion': False
+    }
 
     # Main simulation loop
     for week in range(1, num_weeks_to_simulate + 1):
         print(f"\n{'='*15} SIMULATING WEEK {week} {'='*15}")
+        
+        # --- a) UPDATE MARKET & INTRODUCE SHOCKS ---
+        market_state = update_market_conditions(market_state)
+        print(f"Market Update: CPI={market_state['cpi']:.2f}, Competitor Price=${market_state['competitor_price']:.2f}, Promotion={market_state['is_promotion']}")
+        
+        shock_multiplier = 1.0
+        if np.random.rand() < shock_chance:
+            shock_multiplier = np.random.choice([0.5, 2.0]) # A flash sale or viral trend
+            print(f"!!! SHOCK EVENT !!! Sales will be multiplied by {shock_multiplier}")
+
         df['date'] = pd.to_datetime(df['date'])
         new_weekly_data = []
 
         # Inner loop for each top product
         for product_name in top_products:
-            print(f"\n--- Simulating Product: {product_name} ---")
-
             product_to_simulate = df[df['item_description'] == product_name].sort_values(by='date').iloc[[-1]]
-            X_product_base = product_to_simulate.drop(columns=[
-                'date', 'supplier', 'item_code', 'item_description', 'warehouse_sales'
-            ])
-
-            # --- a) Find the "Best" Price (Exploitation Choice) ---
-            best_price = 0
-            max_profit = -1
-            base_price = product_to_simulate['retail_sales'].values[0]
-            price_candidates = [base_price * 0.9, base_price, base_price * 1.1]
-
-            for price in price_candidates:
-                X_product_temp = X_product_base.copy()
-                X_product_temp['retail_sales'] = price
-                mean_demand, _ = get_probabilistic_forecast(historical_model, X_product_temp)
-                cost = base_price * 0.6
-                profit = (price - cost) * mean_demand
-                
-                if profit > max_profit:
-                    max_profit = profit
-                    best_price = price
+            X_product_base = product_to_simulate.drop(columns=['date', 'supplier', 'item_code', 'item_description', 'warehouse_sales'])
             
-            # --- NEW: Epsilon-Greedy Exploration Step ---
-            if np.random.rand() < epsilon:
-                # EXPLORE: Choose a random price instead of the best one
-                other_prices = [p for p in price_candidates if p != best_price]
-                if not other_prices:
-                    final_prescribed_price = best_price
-                else:
-                    final_prescribed_price = np.random.choice(other_prices)
-                print(f"*** EXPLORATION STEP *** Chose random price: ${final_prescribed_price:.2f}")
-            else:
-                # EXPLOIT: Choose the best-known price
-                final_prescribed_price = best_price
-                print(f"*** EXPLOITATION STEP *** Chose optimal price: ${final_prescribed_price:.2f}")
+            # Update the product features with the current market state
+            X_product_base['cpi'] = market_state['cpi']
+            X_product_base['competitor_price'] = market_state['competitor_price']
 
-            # --- b) SIMULATE SALES OUTCOME ---
-            X_product_final = X_product_base.copy()
-            X_product_final['retail_sales'] = final_prescribed_price
-            final_mean, final_std = get_probabilistic_forecast(historical_model, X_product_final)
-            simulated_sales = max(0, int(np.random.normal(loc=final_mean, scale=final_std)))
-            print(f"Simulated Sales Outcome: {simulated_sales} units")
-
-            # --- c) PREPARE NEW DATA ROW ---
+            # --- b) PRESCRIBE PRICE (Exploit vs. Explore) ---
+            # ... (omitted for brevity, this logic is the same as the last script)
+            # Find the best price based on the model's current understanding
+            best_price, price_candidates = find_best_price(historical_model, X_product_base)
+            final_prescribed_price = choose_price_strategy(best_price, price_candidates, epsilon)
+            
+            # --- c) GET "TRUE" SALES FROM HIDDEN MODEL ---
+            base_demand = product_to_simulate['warehouse_sales'].values[0]
+            base_price = product_to_simulate['retail_sales'].values[0]
+            simulated_sales = get_true_market_demand(final_prescribed_price, base_price, base_demand, market_state, shock_multiplier)
+            print(f"Product: {product_name[:30]}... | Prescribed Price: ${final_prescribed_price:.2f} | True Sales: {simulated_sales} units")
+            
+            # --- d) PREPARE NEW DATA ROW ---
             new_data_row = product_to_simulate.copy()
             new_data_row['warehouse_sales'] = simulated_sales
             new_data_row['retail_sales'] = final_prescribed_price
-            new_data_row['date'] = df['date'].max() + pd.Timedelta(weeks=1) # Increment date consistently
+            new_data_row['cpi'] = market_state['cpi']
+            new_data_row['competitor_price'] = market_state['competitor_price']
+            new_data_row['date'] = df['date'].max() + pd.Timedelta(weeks=1)
             new_weekly_data.append(new_data_row)
 
-        # --- d) AUGMENT DATASET ---
+        # --- e) AUGMENT & RETRAIN ---
         df = pd.concat([df] + new_weekly_data, ignore_index=True)
         print(f"\nDataset augmented. New size: {df.shape[0]} rows.")
-
-        # --- e) RETRAIN MODEL ---
         y = df['warehouse_sales']
         X = df.drop(columns=['date', 'supplier', 'item_code', 'item_description', 'warehouse_sales'])
         historical_model.fit(X, y)
         joblib.dump(historical_model, 'historical_model.pkl')
-        print("Model has been retrained with new weekly data.")
+        print("Model has been retrained on new, more realistic data.")
 
     print(f"\n{'='*15} SIMULATION COMPLETE {'='*15}")
+
+
+# Helper functions to keep the main loop clean
+def find_best_price(model, X_product_base):
+    best_price = 0
+    max_profit = -float('inf')
+    base_price = X_product_base['retail_sales'].values[0]
+    price_candidates = [base_price * 0.9, base_price, base_price * 1.1]
+
+    for price in price_candidates:
+        X_temp = X_product_base.copy()
+        X_temp['retail_sales'] = price
+        mean_demand, _ = get_probabilistic_forecast(model, X_temp)
+        cost = base_price * 0.6
+        profit = (price - cost) * mean_demand
+        if profit > max_profit:
+            max_profit = profit
+            best_price = price
+    return best_price, price_candidates
+
+def choose_price_strategy(best_price, price_candidates, epsilon):
+    if np.random.rand() < epsilon:
+        other_prices = [p for p in price_candidates if p != best_price]
+        return np.random.choice(other_prices) if other_prices else best_price
+    return best_price
 
 def get_probabilistic_forecast(model, data_row):
     predictions = [tree.predict(data_row) for tree in model.estimators_]
