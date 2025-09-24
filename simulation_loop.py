@@ -63,18 +63,20 @@ def run_simulation(num_weeks_to_simulate=10, num_top_products=5, epsilon=0.2, sh
         'competitor_price': df['competitor_price'].mean(),
         'is_promotion': False
     }
+    
+    # NEW: Initialize a list to store the price history
+    price_history = []
 
     # Main simulation loop
     for week in range(1, num_weeks_to_simulate + 1):
         print(f"\n{'='*15} SIMULATING WEEK {week} {'='*15}")
         
-        # --- a) UPDATE MARKET & INTRODUCE SHOCKS ---
         market_state = update_market_conditions(market_state)
         print(f"Market Update: CPI={market_state['cpi']:.2f}, Competitor Price=${market_state['competitor_price']:.2f}, Promotion={market_state['is_promotion']}")
         
         shock_multiplier = 1.0
         if np.random.rand() < shock_chance:
-            shock_multiplier = np.random.choice([0.5, 2.0]) # A flash sale or viral trend
+            shock_multiplier = np.random.choice([0.5, 2.0])
             print(f"!!! SHOCK EVENT !!! Sales will be multiplied by {shock_multiplier}")
 
         df['date'] = pd.to_datetime(df['date'])
@@ -85,23 +87,25 @@ def run_simulation(num_weeks_to_simulate=10, num_top_products=5, epsilon=0.2, sh
             product_to_simulate = df[df['item_description'] == product_name].sort_values(by='date').iloc[[-1]]
             X_product_base = product_to_simulate.drop(columns=['date', 'supplier', 'item_code', 'item_description', 'warehouse_sales'])
             
-            # Update the product features with the current market state
             X_product_base['cpi'] = market_state['cpi']
             X_product_base['competitor_price'] = market_state['competitor_price']
 
-            # --- b) PRESCRIBE PRICE (Exploit vs. Explore) ---
-            # ... (omitted for brevity, this logic is the same as the last script)
-            # Find the best price based on the model's current understanding
             best_price, price_candidates = find_best_price(historical_model, X_product_base)
-            final_prescribed_price = choose_price_strategy(best_price, price_candidates, epsilon)
+            final_prescribed_price, strategy = choose_price_strategy(best_price, price_candidates, epsilon)
             
-            # --- c) GET "TRUE" SALES FROM HIDDEN MODEL ---
+            # NEW: Record the price for this week
+            price_history.append({
+                'Week': week,
+                'Product Name': product_name,
+                'Strategy': strategy,
+                'Prescribed Price': final_prescribed_price
+            })
+            
             base_demand = product_to_simulate['warehouse_sales'].values[0]
             base_price = product_to_simulate['retail_sales'].values[0]
             simulated_sales = get_true_market_demand(final_prescribed_price, base_price, base_demand, market_state, shock_multiplier)
-            print(f"Product: {product_name[:30]}... | Prescribed Price: ${final_prescribed_price:.2f} | True Sales: {simulated_sales} units")
+            print(f"Product: {product_name[:30]}... | Strategy: {strategy} | Price: ${final_prescribed_price:.2f} | True Sales: {simulated_sales} units")
             
-            # --- d) PREPARE NEW DATA ROW ---
             new_data_row = product_to_simulate.copy()
             new_data_row['warehouse_sales'] = simulated_sales
             new_data_row['retail_sales'] = final_prescribed_price
@@ -110,7 +114,6 @@ def run_simulation(num_weeks_to_simulate=10, num_top_products=5, epsilon=0.2, sh
             new_data_row['date'] = df['date'].max() + pd.Timedelta(weeks=1)
             new_weekly_data.append(new_data_row)
 
-        # --- e) AUGMENT & RETRAIN ---
         df = pd.concat([df] + new_weekly_data, ignore_index=True)
         print(f"\nDataset augmented. New size: {df.shape[0]} rows.")
         y = df['warehouse_sales']
@@ -121,12 +124,26 @@ def run_simulation(num_weeks_to_simulate=10, num_top_products=5, epsilon=0.2, sh
 
     print(f"\n{'='*15} SIMULATION COMPLETE {'='*15}")
 
+    # --- NEW: DISPLAY PRICE HISTORY OF SIMULATED PRODUCTS ---
+    print(f"\n{'='*15} PRICE EVOLUTION OF TOP PRODUCTS {'='*15}")
+    history_df = pd.DataFrame(price_history)
+    
+    # Pivot the table for easy comparison
+    price_pivot_table = history_df.pivot_table(
+        index='Product Name',
+        columns='Week',
+        values='Prescribed Price'
+    )
+    
+    print(price_pivot_table.round(2).to_string())
 
-# Helper functions to keep the main loop clean
+
+# Helper functions
 def find_best_price(model, X_product_base):
     best_price = 0
     max_profit = -float('inf')
     base_price = X_product_base['retail_sales'].values[0]
+    if base_price == 0: base_price = 0.1 
     price_candidates = [base_price * 0.9, base_price, base_price * 1.1]
 
     for price in price_candidates:
@@ -142,9 +159,13 @@ def find_best_price(model, X_product_base):
 
 def choose_price_strategy(best_price, price_candidates, epsilon):
     if np.random.rand() < epsilon:
+        strategy = "Exploration"
         other_prices = [p for p in price_candidates if p != best_price]
-        return np.random.choice(other_prices) if other_prices else best_price
-    return best_price
+        price = np.random.choice(other_prices) if other_prices else best_price
+    else:
+        strategy = "Exploitation"
+        price = best_price
+    return price, strategy
 
 def get_probabilistic_forecast(model, data_row):
     predictions = [tree.predict(data_row) for tree in model.estimators_]
